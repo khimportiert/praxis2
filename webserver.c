@@ -310,7 +310,7 @@ char* my_get(KeyValuePair arr[], const char *key) {
     return NULL;
 }
 
-UDP_Packet decode_udp_payload(const void *buf) {
+UDP_Packet decode_udp_payload(const char *buf) {
     UDP_Packet lookup;
     struct in_addr node_ip_bin;
 
@@ -328,7 +328,7 @@ UDP_Packet decode_udp_payload(const void *buf) {
 
     return lookup;
 }
-void udp_lookup_payload(void* buf, const int hash, const NodeInfo *node_info) {
+void udp_lookup_payload(char *buf, const int hash, const NodeInfo *node_info) {
     uint8_t message_type = 0;
     uint16_t hash_id = htons(hash);
     uint16_t node_id = htons(node_info->node_id);
@@ -345,7 +345,7 @@ void udp_lookup_payload(void* buf, const int hash, const NodeInfo *node_info) {
     memcpy(buf + 9, &node_port, 2);
 }
 
-void udp_reply_payload(void *buf, const NodeInfo *node_info, bool i_know_succ_is_responsible) {
+void udp_reply_payload(char *buf, const NodeInfo *node_info, bool i_know_succ_is_responsible) {
     uint8_t message_type = 1;
     uint16_t hash_id = i_know_succ_is_responsible ? htons(node_info->node_id) : htons(node_info->pred_id);
     uint16_t node_id = i_know_succ_is_responsible ? htons(node_info->succ_id) : htons(node_info->node_id);
@@ -392,7 +392,7 @@ bool is_my_succ_responsible(const uint16_t hash, const NodeInfo *node_info) {
 
 bool who_is_responsible(const int tcp_sock, const int udp_sock, const ValidationResult validation, const NodeInfo *this_node_info) {
     // +++ See Other
-    const uint16_t hash = pseudo_hash(validation.uri, strlen(validation.uri));
+    const uint16_t hash = pseudo_hash((const unsigned char*)validation.uri, strlen(validation.uri));
 
     if (am_i_responsible(hash, this_node_info)) {
         printf("%s: YES - I AM\n", MY_PORT);
@@ -408,7 +408,7 @@ bool who_is_responsible(const int tcp_sock, const int udp_sock, const Validation
         if (is_my_succ_responsible(hash, this_node_info)) {
             char see_other[4096] = {0};
             // TODO 307 Temporary Redirect wäre gut, denn 303 wechselt zu GET
-            printf("%s: ...sending 303 response\n");
+            printf("%s: ...sending 303 response\n", MY_PORT);
             fflush(stdout);
             sprintf(see_other, "HTTP/1.1 303 See Other\r\nLocation: http://%s:%d%s\r\nContent-Length: 0\r\n\r\n", this_node_info->succ_ip, this_node_info->succ_port, validation.uri);
             send(tcp_sock, see_other, strlen(see_other), 0);
