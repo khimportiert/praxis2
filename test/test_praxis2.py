@@ -15,8 +15,6 @@ import pytest
 import util
 import dht
 
-import socket
-
 # We assume that all tests from the previous sheet(s) are working!
 
 # -i dumps header
@@ -313,17 +311,22 @@ def test_dht(static_peer):
                 peer, predecessor, successor
             ))
 
+        print("\n +++ Starte GET Test +++ \n")
+
         # Ensure datum is missing
         contact = peers[contact_order[0]]
         with pytest.raises(req.HTTPError) as exception_info:
             util.urlopen(f'http://{contact.ip}:{contact.port}/dynamic/{datum}')
-
         assert exception_info.value.status == 404, f"'/dynamic/{datum}' should be missing, but GET was not answered with '404'"
+
+        print("\n +++ Starte PUT Test +++ \n")
 
         # Create datum
         contact = peers[contact_order[1]]
         reply = util.urlopen(req.Request(f'http://{contact.ip}:{contact.port}/dynamic/{datum}', data=content, method='PUT'))
         assert reply.status == 201, f"Creation of '/dynamic/{datum}' did not yield '201'"
+
+        print("\n +++ Starte GET Test +++ \n")
 
         # Ensure datum exists
         contact = peers[contact_order[2]]
@@ -331,11 +334,15 @@ def test_dht(static_peer):
         assert reply.status == 200
         assert reply.read() == content, f"Content of '/dynamic/{datum}' does not match what was passed"
 
+        print("\n +++ Starte DELETE Test +++ \n")
+
         # Delete datum
         contact = peers[contact_order[3]]
         real_url = util.urlopen(f'http://{contact.ip}:{contact.port}/dynamic/{datum}').geturl()  # Determine correct URL
         reply = util.urlopen(req.Request(real_url, method='DELETE'))
         assert reply.status in {200, 202, 204}, f"Deletion of '/dynamic/{datum}' did not succeed"
+
+        print("\n +++ Starte GET Test +++ \n")
 
         # Ensure datum is missing
         contact = peers[contact_order[4]]

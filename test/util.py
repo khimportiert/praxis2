@@ -45,7 +45,11 @@ def urlopen(url):
         if e.status == 503 and 'Retry-After' in e.headers:
             seconds = int(e.headers['Retry-After'])
             time.sleep(seconds)
-            return urllib.request.urlopen(url)
+            try:
+                return urllib.request.urlopen(url)
+            except urllib.request.HTTPError as ex:
+                time.sleep(seconds)
+                return urllib.request.urlopen(url)
         else:
             raise e
 

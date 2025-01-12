@@ -12,6 +12,7 @@
 #include <time.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <sys/select.h>
 
 #include "data.h"
 #include "http.h"
@@ -19,6 +20,8 @@
 
 #define MAX_SIZE 100
 #define MAX_REPLIES 10
+
+const char *MY_PORT = {0};
 
 typedef struct {
     int node_id;
@@ -41,14 +44,18 @@ typedef struct {
     uint16_t node_port;
 } UDP_Packet;
 
-uint16_t last_hash = 5;
+// uint16_t last_hash = 3; // TODO das muss ordentlich werden https://isis.tu-berlin.de/mod/forum/discuss.php?d=633206
 size_t r = 0;
 UDP_Packet REPLIES[MAX_REPLIES] = {0};
 
 UDP_Packet *search_reply(uint16_t hash_id) {
+    printf("%s: ...searching\n", MY_PORT);
     for (size_t i = 0; i < MAX_REPLIES; i++) {
-        printf("%d\n", REPLIES[i].hash_id);
-        if (REPLIES[i].hash_id == hash_id) {
+        // REPLIES[i].hash_id := pred_id
+        bool yes = REPLIES[i].hash_id <= REPLIES[i].node_id ?
+            hash_id <= REPLIES[i].node_id && hash_id > REPLIES[i].hash_id :
+            hash_id <= REPLIES[i].node_id || hash_id > REPLIES[i].hash_id;
+        if (yes) {
             return &REPLIES[i];
         }
     }
@@ -56,7 +63,6 @@ UDP_Packet *search_reply(uint16_t hash_id) {
 }
 
 void put_reply(const UDP_Packet packet) {
-    printf("hash id: %d\n", packet.hash_id);
     REPLIES[r] = packet;
     r = (r + 1) % MAX_REPLIES;
 }
@@ -389,41 +395,59 @@ bool who_is_responsible(const int tcp_sock, const int udp_sock, const Validation
     const uint16_t hash = pseudo_hash(validation.uri, strlen(validation.uri));
 
     if (am_i_responsible(hash, this_node_info)) {
-        printf("YES\n");
+        printf("%s: YES - I AM\n", MY_PORT);
+        fflush(stdout);
         return true;
         // char payload[1 + 2 + 2 + 4 + 2] = {0};
         // udp_reply_payload(payload, this_node_info);
         // struct sockaddr_in dest_addr = derive_sockaddr(this_node_info->node_ip, this_node_info->node_port);
         // udp_reply(udp_sock, dest_addr, payload, sizeof(payload));
     } else {
-        printf("NO\n");
+        printf("%s: NO - I AM NOT\n", MY_PORT);
 
         if (is_my_succ_responsible(hash, this_node_info)) {
             char see_other[4096] = {0};
+            // TODO 307 Temporary Redirect wäre gut, denn 303 wechselt zu GET
+            printf("%s: ...sending 303 response\n");
+            fflush(stdout);
             sprintf(see_other, "HTTP/1.1 303 See Other\r\nLocation: http://%s:%d%s\r\nContent-Length: 0\r\n\r\n", this_node_info->succ_ip, this_node_info->succ_port, validation.uri);
             send(tcp_sock, see_other, strlen(see_other), 0);
+            // close(tcp_sock);
         }
         else {
             UDP_Packet *found = search_reply(hash);
 
             if (found != NULL) {
-                printf("FOUND\n");
+                printf("%s: FOUND - TCP\n", MY_PORT);
+                printf("%s: ...sending 303 response\n", MY_PORT);
+                fflush(stdout);
                 char see_other[4096] = {0};
+                // TODO 307 Temporary Redirect wäre gut, denn 303 wechselt zu GET
                 sprintf(see_other, "HTTP/1.1 303 See Other\r\nLocation: http://%s:%d%s\r\nContent-Length: 0\r\n\r\n", found->node_ip, found->node_port, validation.uri);
                 send(tcp_sock, see_other, strlen(see_other), 0);
+                // close(tcp_sock);
             }
             else {
-                printf("NOT FOUND\n");
+                printf("%s: NOT FOUND - TCP\n", MY_PORT);
 
-                last_hash = hash;
+                // last_hash = hash;
 
-                char *res = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                // char *res = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n";
-                send(tcp_sock, res, strlen(res), 0);
+                printf("%s: ...starting lookup - TCP -> %d\n", MY_PORT, this_node_info->succ_port);
+                fflush(stdout);
 
                 char payload[1 + 2 + 2 + 4 + 2] = {0};
                 udp_lookup_payload(payload, hash, this_node_info);
                 udp_lookup(udp_sock, this_node_info, payload, sizeof(payload));
+
+                printf("%s: ...sending 503 response\n", MY_PORT);
+                fflush(stdout);
+
+                char *res = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                // char *res = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n";
+                send(tcp_sock, res, strlen(res), 0);
+                // close(tcp_sock);
+
+
             }
 
 
@@ -472,18 +496,19 @@ void handle_tcp_client(const int tcp_sock, const int udp_sock, const NodeInfo *t
                 received_body_length += additional_bytes;
             }
 
-            const char HTTP_RESPONSE_400[] = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
-            const char HTTP_RESPONSE_501[] = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n";
-            const char HTTP_RESPONSE_404[] = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+            const char HTTP_RESPONSE_400[] = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            const char HTTP_RESPONSE_501[] = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            const char HTTP_RESPONSE_404[] = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
             if (validation.result == -1) {
                 send(tcp_sock, HTTP_RESPONSE_400, strlen(HTTP_RESPONSE_400), 0);
             }
 
+            fprintf(stdout, "%s: Handling %d request for %s (%d byte payload)\n", MY_PORT, validation.result, validation.uri, validation.content_length);
+            fflush(stdout);
+
             bool i_am = who_is_responsible(tcp_sock, udp_sock, validation, this_node_info);
-            fprintf(stderr, "Handling %d request for %s (%d byte payload)\n", validation.result, validation.uri, validation.content_length);
             if (!i_am) {
-                fprintf(stderr, "not responsible\n");
                 return;
             }
 
@@ -503,21 +528,20 @@ void handle_tcp_client(const int tcp_sock, const int udp_sock, const NodeInfo *t
                 else {
                     char *resource_name = strstr(validation.uri, "/dynamic/");
                     if (resource_name == NULL) {
-
-                        // ++++ NEWNEW
-                        // who_is_responsible(tcp_sock, udp_sock, validation, this_node_info);
-
                         send(tcp_sock, HTTP_RESPONSE_404, strlen(HTTP_RESPONSE_404), 0);
+                        // close(tcp_sock); // broken pipe error
                     } else {
                         resource_name += strlen("/dynamic/");
                         char *data = my_get(RESOURCES, resource_name);
                         if (data == NULL) {
                             send(tcp_sock, HTTP_RESPONSE_404, strlen(HTTP_RESPONSE_404), 0);
+                            close(tcp_sock); // -2
                         } else {
-                            char res[] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ";
+                            char res[] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: ";
                             char response[8192+1];
                             sprintf(response, "%s%ld\r\n\r\n%s", res, strlen(data), data);
                             send(tcp_sock, response, strlen(response), 0);
+                            close(tcp_sock);
                         }
                     }
                 }
@@ -526,17 +550,20 @@ void handle_tcp_client(const int tcp_sock, const int udp_sock, const NodeInfo *t
             else if (validation.result == 1) { // PUT
                 char *resource_name = strstr(validation.uri, "/dynamic/");
                 if (resource_name == NULL) {
-                    const char RES[] = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+                    const char RES[] = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     send(tcp_sock, RES, strlen(RES), 0);
+                    close(tcp_sock);
                 } else {
                     resource_name += strlen("/dynamic/");
                     int is_new = my_put(RESOURCES, resource_name, body);
                     if (is_new) {
-                        const char RES[] = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n";
+                        const char RES[] = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         send(tcp_sock, RES, strlen(RES), 0);
+                        close(tcp_sock); // -1
                     } else {
-                        const char RES[] = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+                        const char RES[] = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         send(tcp_sock, RES, strlen(RES), 0);
+                        close(tcp_sock);
                     }
                 }
             }
@@ -544,18 +571,20 @@ void handle_tcp_client(const int tcp_sock, const int udp_sock, const NodeInfo *t
             else if (validation.result == 2) { // DELETE
                 char *resource_name = strstr(validation.uri, "/dynamic/");
                 if (resource_name == NULL) {
-                    const char RES[] = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+                    const char RES[] = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     send(tcp_sock, RES, strlen(RES), 0);
+                    close(tcp_sock);
                 } else {
                     resource_name += strlen("/dynamic/");
-                    printf("%s\n", resource_name);
                     int is_deleted = my_delete(RESOURCES, resource_name);
                     if (is_deleted) {
-                        const char RES[] = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+                        const char RES[] = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         send(tcp_sock, RES, strlen(RES), 0);
+                        close(tcp_sock);
                     } else {
-                        const char RES[] = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                        const char RES[] = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         send(tcp_sock, RES, strlen(RES), 0);
+                        close(tcp_sock);
                     }
                 }
             }
@@ -569,6 +598,7 @@ void handle_tcp_client(const int tcp_sock, const int udp_sock, const NodeInfo *t
             memmove(current_packet, current_packet + processed_length, strlen(current_packet) - processed_length + 1);
         }
     }
+    close(tcp_sock);
 }
 
 static int setup_udp_socket(struct sockaddr_in addr) {
@@ -589,9 +619,12 @@ static int setup_udp_socket(struct sockaddr_in addr) {
     return sock;
 }
 
+
 int main(int argc, char *argv[]) {
     const char *HOST = argv[1];
     const char *PORT = argv[2];
+
+    MY_PORT = PORT;
 
     int tcp_sock = socket(PF_INET, SOCK_STREAM, 0);
     struct sockaddr_in my_addr = derive_sockaddr(HOST, PORT);
@@ -606,14 +639,14 @@ int main(int argc, char *argv[]) {
 
     int udp_sock = setup_udp_socket(my_addr);
 
-    int node_id = 0; // TODO eig. 0
+    int this_node_id = 0; // TODO eig. 0
     if (argc == 4) {
-        node_id = atoi(argv[3]);
+        this_node_id = atoi(argv[3]);
     }
 
-    NodeInfo node_info = init_node_info(node_id,  PORT, HOST);
+    NodeInfo node_info = init_node_info(this_node_id,  PORT, HOST);
 
-    printf("server: waiting for connections...\n");
+    printf("%s: waiting for connections...\n", PORT);
 
     fd_set read_fds;
     int max_fd = tcp_sock > udp_sock ? tcp_sock : udp_sock;
@@ -652,16 +685,22 @@ int main(int argc, char *argv[]) {
                 perror("recvfrom");
             } else {
                 buffer[len] = '\0';
-                printf("Received UDP packet: %s\n", buffer);
+                printf("%s: Received UDP packet <- %d\n", MY_PORT, ntohs(client_addr.sin_port));
             }
 
             UDP_Packet packet = decode_udp_payload(buffer);
-            printf("Message Type: %d\n", packet.message_type);
-            printf("Hash ID: %d\n", packet.hash_id);
-            printf("Node ID: %d\n", packet.node_id);
-            printf("Node IP: %s\n", packet.node_ip);
-            printf("Node Port: %d\n", packet.node_port);
+            printf("%s: Message Type: %d\n", MY_PORT, packet.message_type);
+            printf("%s: Hash ID: %d\n", MY_PORT, packet.hash_id);
+            printf("%s: Node ID: %d\n", MY_PORT, packet.node_id);
+            printf("%s: Node IP: %s\n", MY_PORT, packet.node_ip);
+            printf("%s: Node Port: %d\n", MY_PORT, packet.node_port);
             fflush(stdout);
+
+            if (packet.message_type == 1) {
+                put_reply(packet);
+                printf("%s: PUT!\n", MY_PORT);
+                fflush(stdout);
+            }
 
             if (packet.message_type == 0) {
 
@@ -670,6 +709,10 @@ int main(int argc, char *argv[]) {
                     sprintf(lookup_port, "%u", packet.node_port);
                     struct sockaddr_in dest_addr = derive_sockaddr(packet.node_ip, lookup_port);
                     char payload[1 + 2 + 2 + 4 + 2] = {0};
+
+                    printf("%s: i am responsible - UDP -> %d\n", MY_PORT, packet.node_port);
+                    fflush(stdout);
+
                     udp_reply_payload(payload, &node_info, false);
                     udp_reply(udp_sock, dest_addr, payload, sizeof(payload));
                 }
@@ -678,6 +721,10 @@ int main(int argc, char *argv[]) {
                     sprintf(lookup_port, "%u", packet.node_port);
                     struct sockaddr_in dest_addr = derive_sockaddr(packet.node_ip, lookup_port);
                     char payload[1 + 2 + 2 + 4 + 2] = {0};
+
+                    printf("%s: my succ is responsible - UDP -> %d\n", MY_PORT, packet.node_port);
+                    fflush(stdout);
+
                     udp_reply_payload(payload, &node_info, true);
                     udp_reply(udp_sock, dest_addr, payload, sizeof(payload));
                 }
@@ -685,50 +732,41 @@ int main(int argc, char *argv[]) {
                     UDP_Packet *found = search_reply(packet.hash_id);
 
                     if (found != NULL) {
-                        printf("FOUND IN UDP\n");
+                        printf("%s: FOUND - UDP\n", MY_PORT);
                         char lookup_port[6] = {0};
-                        sprintf(lookup_port, "%u", found->node_port);
-                        struct sockaddr_in dest_addr = derive_sockaddr(found->node_ip, lookup_port);
-                        udp_reply_payload(found, &node_info, true);
-                        udp_reply(udp_sock, dest_addr, found, sizeof(&found));
+                        sprintf(lookup_port, "%u", packet.node_port);
+                        struct sockaddr_in dest_addr = derive_sockaddr(packet.node_ip, lookup_port);
+
+                        printf("%s: ...sending Reply - UDP -> %d\n", MY_PORT, packet.node_port);
+                        fflush(stdout);
+
+                        char payload[1 + 2 + 2 + 4 + 2] = {0};
+
+                        uint8_t message_type = 1;
+                        uint16_t hash_id = htons(found->hash_id); // hash_id := pred_id
+                        uint16_t node_id = htons(found->node_id);
+                        uint16_t node_port = htons(found->node_port);
+                        const char *node_ip = found->node_ip;
+                        struct in_addr node_ip_bin;
+                        inet_pton(AF_INET, node_ip, &node_ip_bin);
+
+                        memcpy(payload, &message_type, 1);
+                        memcpy(payload + 1, &hash_id, 2);
+                        memcpy(payload + 3, &node_id, 2);
+                        memcpy(payload + 5, &node_ip_bin, 4);
+                        memcpy(payload + 9, &node_port, 2);
+
+                        udp_reply(udp_sock, dest_addr, payload, sizeof(payload));
                     } else {
-                        printf("NOT FOUND IN UDP\n");
+                        printf("%s: NOT FOUND - UDP\n", MY_PORT);
+                        printf("%s: ...starting lookup - TCP -> %d\n", MY_PORT, node_info.succ_port);
+                        fflush(stdout);
                         udp_lookup(udp_sock, &node_info, buffer, 11);
                     }
 
                 }
 
             }
-
-            else if (packet.message_type == 1) {
-                UDP_Packet p;
-                p.message_type = packet.message_type;
-                p.hash_id = last_hash;
-                p.node_id = packet.node_id;
-                memcpy(p.node_ip, packet.node_ip, sizeof(packet.node_ip));
-                p.node_port = packet.node_port;
-                put_reply(p);
-                printf("PUT!\n");
-            }
         }
     }
-
-    // while (1) {
-    //     struct sockaddr_storage their_addr;
-    //     socklen_t addr_size = sizeof their_addr;
-    //     const int new_fd = accept(tcp_sock, (struct sockaddr *)&their_addr, &addr_size);
-    //
-    //     if (new_fd == -1) {
-    //         perror("accept");
-    //         continue;
-    //     }
-    //
-    //     handle_tcp_client(new_fd, &node_info);
-    //
-    //     // struct sockaddr_in client_addr;
-    //     // socklen_t addr_len = sizeof(client_addr);
-    //     // char buffer[1000];
-    //     // recvfrom(udp_sock, buffer, 1000, 0, (struct sockaddr *)&client_addr, &addr_len);
-    //     // printf("Received packet: %s\n", buffer);
-    // }
 }
